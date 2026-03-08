@@ -48,6 +48,34 @@ from privacyshield.text_pipeline.redactor import redact_text, get_redaction_stat
 logger = logging.getLogger(__name__)
 
 
+import fitz
+
+def _get_redaction_boxes_fitz(pdf_path, page_num, entities, page_height):
+    """Use PyMuPDF text search to find exact bbox for each entity."""
+    boxes = []
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc[page_num - 1]
+        for entity in entities:
+            search_text = entity["text"]
+            # For medical conditions, search for just the value part
+            if entity["entity_type"] == "MEDICAL_CONDITION" and ":" in search_text:
+                search_text = search_text.split(":", 1)[1].strip()
+            instances = page.search_for(search_text)
+            for rect in instances:
+                boxes.append({
+                    "entity_type": entity["entity_type"],
+                    "text": entity["text"],
+                    "bbox": {"x0": rect.x0, "y0": rect.y0, "x1": rect.x1, "y1": rect.y1},
+                    "page_number": page_num,
+                    "page_height": page_height,
+                })
+                break  # take first match only
+        doc.close()
+    except Exception as e:
+        logger.error(f"fitz bbox search failed: {e}")
+    return boxes
+
 def run_text_pipeline(pdf_path: str) -> dict:
     """
     Run the full text redaction pipeline on a PDF.
@@ -101,22 +129,11 @@ def run_text_pipeline(pdf_path: str) -> dict:
             logger.error(f"Page {page_num}: NER failed — {e}")
             entities = []
 
-        # Get bounding boxes for each PII span
-        redaction_boxes = []
-        for entity in entities:
-            bbox = get_merged_bbox_for_span(
-                page_ext,
-                entity["start"],
-                entity["end"] - 1  # end is exclusive in NER, inclusive here
-            )
-            if bbox:
-                redaction_boxes.append({
-                    "entity_type": entity["entity_type"],
-                    "text": entity["text"],
-                    "bbox": bbox.to_dict(),
-                    "page_number": page_num,
-                    "page_height": page_ext.height,
-                })
+        # Get bounding boxes using PyMuPDF text search
+        # More reliable than char coordinate mapping
+        redaction_boxes = _get_redaction_boxes_fitz(
+            pdf_path, page_num, entities, page_ext.height
+        )
 
         # Redact text — pass global map so tokens stay consistent
         try:

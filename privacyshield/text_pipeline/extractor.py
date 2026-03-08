@@ -399,7 +399,10 @@ def extract_page(pdf_page: pdfplumber.page.Page, page_number: int) -> PageExtrac
             height      = pdf_page.height,
         )
 
-    full_text, charboxes = _build_charboxes(raw_chars, page_number)
+    # Use extract_text() for full_text — it correctly inserts newlines between lines
+    # Use raw chars only for coordinate extraction
+    full_text = pdf_page.extract_text() or ""
+    _, charboxes = _build_charboxes(raw_chars, page_number)
     words = _build_wordboxes(charboxes)
     lines = _build_lineboxes(charboxes)
 
