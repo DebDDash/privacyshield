@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PrivacyShield — PDF Redactor</title>
+  <style>
+    /* ── reset & base ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --border:    #2a2d3a;
+      --accent:    #6c63ff;
+      --accent-h:  #8b83ff;
+      --green:     #34d399;
+      --red:       #f87171;
+      --text:      #e2e8f0;
+      --text-dim:  #94a3b8;
+      --radius:    12px;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    /* ── card ──────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2.5rem 2rem;
+      width: 100%;
+      max-width: 520px;
+      text-align: center;
+      box-shadow: 0 8px 30px rgba(0,0,0,.35);
+    }
+
+    .card h1 {
+      font-size: 1.6rem;
+      margin-bottom: .25rem;
+    }
+    .card h1 span { color: var(--accent); }
+    .card .subtitle {
+      color: var(--text-dim);
+      font-size: .9rem;
+      margin-bottom: 1.8rem;
+    }
+
+    /* ── drop zone ────────────────────────────────────────────────── */
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 2.5rem 1rem;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      position: relative;
+    }
+    .dropzone:hover,
+    .dropzone.dragover {
+      border-color: var(--accent);
+      background: rgba(108,99,255,.06);
+    }
+    .dropzone input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+    .dropzone .icon {
+      font-size: 2.5rem;
+      margin-bottom: .6rem;
+    }
+    .dropzone p {
+      color: var(--text-dim);
+      font-size: .92rem;
+    }
+    .dropzone p strong { color: var(--accent); }
+
+    /* ── file info row ────────────────────────────────────────────── */
+    .file-info {
+      display: none;
+      align-items: center;
+      gap: .75rem;
+      margin-top: 1.2rem;
+      padding: .75rem 1rem;
+      border-radius: 8px;
+      background: rgba(108,99,255,.08);
+      text-align: left;
+    }
+    .file-info.visible { display: flex; }
+    .file-info .fi-icon { font-size: 1.4rem; flex-shrink: 0; }
+    .file-info .fi-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: .88rem;
+    }
+    .file-info .fi-size {
+      color: var(--text-dim);
+      font-size: .8rem;
+      white-space: nowrap;
+    }
+    .file-info .fi-remove {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      font-size: 1.1rem;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .file-info .fi-remove:hover { color: var(--red); background: rgba(248,113,113,.1); }
+
+    /* ── button ────────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: .5rem;
+      margin-top: 1.4rem;
+      padding: .7rem 1.8rem;
+      border: none;
+      border-radius: 8px;
+      font-size: .95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .2s, transform .1s;
+      width: 100%;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-h); }
+    .btn-primary:disabled { opacity: .45; cursor: not-allowed; }
+
+    .btn-success {
+      background: var(--green);
+      color: #0f1117;
+    }
+    .btn-success:hover { filter: brightness(1.08); }
+
+    /* ── progress bar ─────────────────────────────────────────────── */
+    .progress-wrap {
+      display: none;
+      margin-top: 1.2rem;
+    }
+    .progress-wrap.visible { display: block; }
+    .progress-bar {
+      height: 6px;
+      border-radius: 3px;
+      background: var(--border);
+      overflow: hidden;
+    }
+    .progress-bar .fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width .3s;
+    }
+    .progress-label {
+      margin-top: .5rem;
+      font-size: .82rem;
+      color: var(--text-dim);
+    }
+
+    /* ── status message ───────────────────────────────────────────── */
+    .status {
+      margin-top: 1rem;
+      font-size: .88rem;
+      min-height: 1.4em;
+    }
+    .status.error { color: var(--red); }
+    .status.success { color: var(--green); }
+
+    /* ── footer ───────────────────────────────────────────────────── */
+    footer {
+      margin-top: 2rem;
+      font-size: .78rem;
+      color: var(--text-dim);
+    }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h1><span>Privacy</span>Shield</h1>
+  <p class="subtitle">Upload a PDF to redact sensitive information</p>
+
+  <!-- drop zone -->
+  <div class="dropzone" id="dropzone">
+    <input type="file" id="fileInput" accept=".pdf" />
+    <div class="icon">📄</div>
+    <p>Drag &amp; drop your PDF here or <strong>browse</strong></p>
+    <p style="margin-top:.3rem;font-size:.78rem">Max 50 MB &middot; PDF only</p>
+  </div>
+
+  <!-- selected file info -->
+  <div class="file-info" id="fileInfo">
+    <span class="fi-icon">📎</span>
+    <span class="fi-name" id="fileName"></span>
+    <span class="fi-size" id="fileSize"></span>
+    <button class="fi-remove" id="fileRemove" title="Remove">&times;</button>
+  </div>
+
+  <!-- upload button -->
+  <button class="btn btn-primary" id="uploadBtn" disabled>
+    <span id="uploadBtnText">Upload &amp; Process</span>
+  </button>
+
+  <!-- progress -->
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+    <p class="progress-label" id="progressLabel">Uploading…</p>
+  </div>
+
+  <!-- download button (hidden until ready) -->
+  <a class="btn btn-success" id="downloadBtn" style="display:none" href="#">
+    ⬇&ensp;Download Redacted PDF
+  </a>
+
+  <!-- status / error -->
+  <p class="status" id="status"></p>
+</div>
+
+<footer>PrivacyShield &copy; 2026</footer>
+
+<script>
+(() => {
+  const dropzone    = document.getElementById('dropzone');
+  const fileInput   = document.getElementById('fileInput');
+  const fileInfo    = document.getElementById('fileInfo');
+  const fileName    = document.getElementById('fileName');
+  const fileSize    = document.getElementById('fileSize');
+  const fileRemove  = document.getElementById('fileRemove');
+  const uploadBtn   = document.getElementById('uploadBtn');
+  const uploadBtnText = document.getElementById('uploadBtnText');
+  const progressWrap= document.getElementById('progressWrap');
+  const progressFill= document.getElementById('progressFill');
+  const progressLabel = document.getElementById('progressLabel');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const status      = document.getElementById('status');
+
+  let selectedFile = null;
+
+  /* ── helpers ─────────────────────────────────────────────────── */
+  const formatBytes = (b) => {
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+  };
+
+  const reset = () => {
+    selectedFile = null;
+    fileInput.value = '';
+    fileInfo.classList.remove('visible');
+    uploadBtn.disabled = true;
+    uploadBtnText.textContent = 'Upload & Process';
+    progressWrap.classList.remove('visible');
+    progressFill.style.width = '0%';
+    downloadBtn.style.display = 'none';
+    status.textContent = '';
+    status.className = 'status';
+  };
+
+  const showFile = (file) => {
+    selectedFile = file;
+    fileName.textContent = file.name;
+    fileSize.textContent = formatBytes(file.size);
+    fileInfo.classList.add('visible');
+    uploadBtn.disabled = false;
+    downloadBtn.style.display = 'none';
+    status.textContent = '';
+    status.className = 'status';
+  };
+
+  /* ── drag & drop ─────────────────────────────────────────────── */
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.toLowerCase().endsWith('.pdf')) {
+      showFile(file);
+    } else {
+      status.textContent = 'Please drop a PDF file.';
+      status.className = 'status error';
+    }
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length) showFile(fileInput.files[0]);
+  });
+
+  fileRemove.addEventListener('click', reset);
+
+  /* ── upload ──────────────────────────────────────────────────── */
+  uploadBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+
+    uploadBtn.disabled = true;
+    uploadBtnText.textContent = 'Processing…';
+    progressWrap.classList.add('visible');
+    progressFill.style.width = '0%';
+    progressLabel.textContent = 'Uploading…';
+    status.textContent = '';
+    status.className = 'status';
+    downloadBtn.style.display = 'none';
+
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+
+    try {
+      const xhr = new XMLHttpRequest();
+
+      // track upload progress
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          progressFill.style.width = pct + '%';
+          progressLabel.textContent = `Uploading… ${pct}%`;
+        }
+      });
+
+      const response = await new Promise((resolve, reject) => {
+        xhr.open('POST', '/upload');
+        xhr.onload = () => resolve(xhr);
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.send(formData);
+      });
+
+      progressFill.style.width = '100%';
+      progressLabel.textContent = 'Processing…';
+
+      if (response.status !== 200) {
+        const err = JSON.parse(response.responseText);
+        throw new Error(err.error || 'Upload failed.');
+      }
+
+      const data = JSON.parse(response.responseText);
+
+      // done!
+      progressLabel.textContent = 'Done!';
+      status.textContent = 'Your redacted PDF is ready.';
+      status.className = 'status success';
+      uploadBtnText.textContent = 'Upload & Process';
+
+      downloadBtn.href = `/download/${data.job_id}?name=${encodeURIComponent(data.download_name)}`;
+      downloadBtn.style.display = 'inline-flex';
+
+    } catch (err) {
+      status.textContent = err.message;
+      status.className = 'status error';
+      uploadBtnText.textContent = 'Upload & Process';
+      progressWrap.classList.remove('visible');
+    } finally {
+      uploadBtn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
