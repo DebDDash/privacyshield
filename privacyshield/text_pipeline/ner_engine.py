@@ -1,6 +1,8 @@
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from langdetect import detect as detect_language
+import os
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 CONFIDENCE_THRESHOLD = 0.4
 def validate_iban(iban):
