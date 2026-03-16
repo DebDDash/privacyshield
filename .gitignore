@@ -9,3 +9,4 @@ env/
 *.key
 ui/node_modules/
 .DS_Store
+outputs/
