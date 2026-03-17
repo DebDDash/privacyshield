@@ -56,7 +56,7 @@ def validate_iban(iban):
 GENERIC_NUMBER_LABELS = [
     "number", "no.", "no:", "#", "num.", "num:", "id:", "id no",
     "nummer", "numéro", "numero", "número",
-    "policy number", "policy no", "policy #",
+    "policy number", "policy no", "policy #", "policy#",
     "invoice number", "invoice no", "invoice #",
     "claim number", "claim no", "claim #",
     "reference number", "reference no", "ref no", "ref #",
@@ -74,21 +74,36 @@ GENERIC_NUMBER_LABELS = [
     "license number", "license no",
 ]
 
+# UUID pattern — matches standard 8-4-4-4-12 hex UUID (case-insensitive)
+_UUID_RE = re.compile(
+    r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b'
+)
+
 def _extract_context_numbers(text):
     """
     Extract values that follow label words like 'policy number', 'invoice #' etc.
+    Also directly extracts UUIDs anywhere in the line.
     Returns list of (start, end, value) tuples.
     """
     found = []
     text_lower = text.lower()
 
     for label in GENERIC_NUMBER_LABELS:
-        pattern = re.escape(label) + r"[\s:]*([A-Z0-9][A-Z0-9\-\/\.]{2,30})"
+        # FIX: pattern now uses [a-z0-9] (lowercase) to match against text_lower,
+        # then maps back to original text positions for the actual value.
+        # Also extended value pattern to allow lowercase hex chars for UUIDs.
+        pattern = re.escape(label) + r"[\s:]*([a-z0-9][a-z0-9\-\/\.]{2,50})"
         for m in re.finditer(pattern, text_lower):
             actual_start = m.start(1)
             actual_end = m.end(1)
             actual_value = text[actual_start:actual_end]
             found.append((actual_start, actual_end, actual_value))
+
+    # FIX: Also scan for bare UUIDs on the line — these won't be caught by
+    # the label loop if the label is something like "Policy #:" (handled above)
+    # but is also needed as a safety net for unlabelled UUIDs in body text.
+    for m in _UUID_RE.finditer(text):
+        found.append((m.start(), m.end(), m.group()))
 
     return found
 
@@ -102,20 +117,33 @@ ADDRESS_LABEL_RE = re.compile(
     r"([A-Za-z0-9\s,\.\-\#\/]{10,150}?)(?=\n|$)"
 )
 
+# Regex to detect unlabelled street addresses (letterhead / recipient block style).
+# Matches lines like: "0749 Stokes Vista Suite 450, North Angela, OH 43648"
+# Pattern: starts with house number, has street name, optional suite/apt, city, state, zip.
+ADDRESS_STREET_RE = re.compile(
+    r"(?m)^\s*"
+    r"(\d{1,6}"                                          # house number
+    r"(?:\s+[A-Za-z0-9]+){2,6}"                         # street name words
+    r"(?:\s+(?:Suite|Ste|Apt|Apt\.|Floor|Fl|Unit|#)\s*\d+[A-Za-z]?)?"  # optional unit
+    r",\s*[A-Za-z\s]{2,30}"                              # city
+    r",\s*[A-Z]{2}"                                      # state abbreviation
+    r"\s+\d{5}(?:-\d{4})?)"                              # ZIP / ZIP+4
+    r"\s*$"
+)
+
 def _extract_address_entities(text, existing_entities):
     """
     Extract full addresses that spaCy may have missed or only partially captured.
-    Matches patterns like 'Address: 123 Main St, Springfield, IL 62701'
-    and ensures the full string is tagged as LOCATION.
+
+    Two strategies:
+    1. Label-based  — 'Address: 123 Main St, ...'  (ADDRESS_LABEL_RE)
+    2. Pattern-based — bare street lines like letterhead addresses (ADDRESS_STREET_RE)
     """
     extra = []
-    for m in ADDRESS_LABEL_RE.finditer(text):
-        start = m.start(1)
-        end = m.end(1)
-        value = m.group(1).strip()
-        if len(value) < 8:
-            continue
-        # Only add if this span is not already fully covered by an existing entity
+
+    def _add(start, end, value):
+        if len(value.strip()) < 8:
+            return
         already = any(
             e["start"] <= start and end <= e["end"]
             for e in existing_entities
@@ -123,11 +151,20 @@ def _extract_address_entities(text, existing_entities):
         if not already:
             extra.append({
                 "entity_type": "LOCATION",
-                "text": value,
+                "text": value.strip(),
                 "start": start,
                 "end": end,
-                "score": 0.9
+                "score": 0.92
             })
+
+    # Strategy 1: labelled addresses
+    for m in ADDRESS_LABEL_RE.finditer(text):
+        _add(m.start(1), m.end(1), m.group(1))
+
+    # Strategy 2: unlabelled street addresses (letterhead style)
+    for m in ADDRESS_STREET_RE.finditer(text):
+        _add(m.start(1), m.end(1), m.group(1))
+
     return extra
 
 # ─── CUSTOM RECOGNIZERS ───────────────────────────────────────────────────────
@@ -167,10 +204,15 @@ def _build_custom_recognizers():
             patterns=[
                 Pattern("intl_phone", r"\+\d{1,3}[\s.\-]?\d{2,3}[\s.\-]?\d{3}[\s.\-]?\d{2}[\s.\-]?\d{2}", 0.85),
                 Pattern("us_phone",   r"\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b", 0.75),
-                Pattern("us_phone2",  r"\(\d{3}\)\d{3}-\d{4}", 0.85),
+                # FIX: us_phone2 raised to score 0.95 and no context needed — parenthesised
+                # format like (293)796-3030 is unambiguously a phone number regardless of label.
+                Pattern("us_phone2",  r"\(\d{3}\)\s?\d{3}[-.\s]?\d{4}", 0.95),
+                Pattern("us_phone3",  r"\(\d{3}\)\d{3}-\d{4}", 0.95),
                 Pattern("fr_phone",   r"\+33[\s.]?\d[\s.]?(?:\d{2}[\s.]?){4}", 0.85),
             ],
-            context=["tel","tél","phone","telefon","telefono","teléfono","mobile","handy"]))
+            # Added "contact" and "fax" so lines like "Contact: (293)796-3030" match
+            context=["tel","tél","phone","telefon","telefono","teléfono","mobile","handy",
+                     "contact","fax","call","reach","helpline","hotline","number"]))
 
     # Email — all languages
     for lang in ALL_LANGUAGES:
@@ -194,12 +236,12 @@ def _build_custom_recognizers():
                 0.85)],
             context=["employee","patient","policy","member","account","id","number","claim","tax","invoice"]))
 
-    # UUID — all languages
+    # UUID — all languages (case-insensitive hex, e.g. deafac4f-03f6-408e-b7c4-d038e533bff5)
     for lang in ALL_LANGUAGES:
         recognizers.append(PatternRecognizer(supported_entity="ID_NUMBER",
             supported_language=lang,
             patterns=[Pattern("uuid",
-                r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+                r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
                 0.95)],
             context=[]))
 
@@ -330,16 +372,14 @@ def _remove_false_positives(entities, text, document_type):
         ):
             continue
 
-        # ── FIX 3: Skip age values ─────────────────────────────────────────────
-        # "Age: 34" or "age 34" — the number should not be redacted.
-        if et in ("DATE_TIME", "NRP", "ID_NUMBER", "NUMBER"):
-            # Check up to 15 characters before this entity for the word "age"
-            preceding = text[max(0, entity["start"] - 15):entity["start"]].lower()
-            if re.search(r'\bage\b', preceding):
-                continue
+        # ── Never redact age values (any entity type) ─────────────────────────
+        # Covers "Age: 34", "age: forty-two", "Age 28" etc.
+        # Check up to 20 chars before entity for the standalone word "age".
+        _pre = text[max(0, entity["start"] - 20):entity["start"]].lower()
+        if re.search(r'\bage\s*[:\-]?\s*$', _pre):
+            continue
 
-        # ── FIX 3: Skip pure short numeric strings mis-tagged as DATE_TIME ──────
-        # e.g. "34" on its own shouldn't be redacted as a date
+        # ── Skip pure short numeric strings mis-tagged as DATE_TIME ───────────
         if et == "DATE_TIME" and re.fullmatch(r'\d{1,3}', t.strip()):
             continue
 
@@ -394,6 +434,65 @@ def _deduplicate_entities(entities):
             final.append(entity)
     return sorted(final, key=lambda x: x["start"])
 
+# ─── GLOBAL CONSISTENCY ───────────────────────────────────────────────────────
+
+def _apply_global_consistency(entities, text):
+    """
+    If a value (e.g. a person name, UUID, phone) was detected and confirmed as
+    PII at one location in the document, find and tag ALL other occurrences of
+    that exact string so redaction is uniform throughout the document.
+
+    Only applies to entity types where repetition is meaningful:
+    PERSON, PHONE_NUMBER, EMAIL_ADDRESS, ID_NUMBER, IBAN_CODE, CH_AHV,
+    SWIFT_BIC, IN_PAN, US_SSN, INTERNAL_REF, COMPANY_NAME, LOCATION.
+
+    Short or generic values (< 4 chars) are skipped to avoid false positives.
+    """
+    CONSISTENCY_TYPES = {
+        "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "ID_NUMBER",
+        "IBAN_CODE", "CH_AHV", "SWIFT_BIC", "IN_PAN", "US_SSN",
+        "INTERNAL_REF", "COMPANY_NAME", "LOCATION", "MEDICAL_CONDITION",
+    }
+
+    # Build a map of confirmed values → entity_type
+    confirmed = {}
+    for e in entities:
+        if e["entity_type"] in CONSISTENCY_TYPES and len(e["text"].strip()) >= 4:
+            val = e["text"].strip()
+            # Prefer higher-confidence entity type if same text appears twice
+            if val not in confirmed or e["score"] > confirmed[val]["score"]:
+                confirmed[val] = {"entity_type": e["entity_type"], "score": e["score"]}
+
+    if not confirmed:
+        return entities
+
+    # Existing covered spans so we don't double-tag
+    existing_spans = {(e["start"], e["end"]) for e in entities}
+    extra = []
+
+    for value, meta in confirmed.items():
+        # Escape for regex; match whole-word boundaries where possible
+        escaped = re.escape(value)
+        pattern = r'(?<![A-Za-z0-9])' + escaped + r'(?![A-Za-z0-9])'
+        for m in re.finditer(pattern, text):
+            span = (m.start(), m.end())
+            if span not in existing_spans:
+                existing_spans.add(span)
+                extra.append({
+                    "entity_type": meta["entity_type"],
+                    "text": value,
+                    "start": m.start(),
+                    "end": m.end(),
+                    "score": round(meta["score"] * 0.95, 3),  # slightly lower — inferred
+                })
+
+    if not extra:
+        return entities
+
+    combined = entities + extra
+    return sorted(combined, key=lambda x: x["start"])
+
+
 # ─── PUBLIC API ───────────────────────────────────────────────────────────────
 
 def detect_pii(text, language="auto", document_type="auto"):
@@ -442,7 +541,7 @@ def detect_pii(text, language="auto", document_type="auto"):
     # entire value as LOCATION so it gets fully redacted.
     all_entities += _extract_address_entities(text, all_entities)
 
-    # Extract names from label patterns missed by spaCy
+    # ── Extract names from label patterns missed by spaCy ─────────────────────
     # e.g. "Insured Name: Amanda Coleman", "Taxpayer Name: Tyler Moore"
     name_label_re = re.compile(
         r"(?i)(?:insured|taxpayer|signer|patient|employee|member|"
@@ -463,8 +562,38 @@ def detect_pii(text, language="auto", document_type="auto"):
                 "score": 0.9
             })
 
+    # ── FIX 2: Extract company/insurer names after a Company/Insurer label ─────
+    # "Company: Hughes Group", "Insurer: Acme Ltd", "Employer: Globex Corp" etc.
+    # These are tagged as COMPANY_NAME so they get redacted.
+    company_label_re = re.compile(
+        r"(?i)(?:company|insurer|insured\s+by|employer|firm|organisation|organization|"
+        r"carrier|underwriter|provider|issuer|issued\s+by)\s*[:\-]\s*"
+        r"([A-Z][A-Za-z0-9&',\.\s\-]{1,80}?)(?=\n|$|,|\|)"
+    )
+    for m in company_label_re.finditer(text):
+        start = m.start(1)
+        end = m.end(1)
+        value = m.group(1).strip()
+        if not value:
+            continue
+        already = any(e["start"] <= start and end <= e["end"] for e in all_entities)
+        if not already:
+            all_entities.append({
+                "entity_type": "COMPANY_NAME",
+                "text": value,
+                "start": start,
+                "end": end,
+                "score": 0.9
+            })
+
     all_entities = _remove_false_positives(all_entities, text, document_type)
     all_entities = _deduplicate_entities(all_entities)
+
+    # ── FIX 3: Global consistency — if a value was redacted anywhere, redact it
+    # everywhere in the document. This prevents the same name/ID from being
+    # redacted on line 3 but left visible on line 12.
+    all_entities = _apply_global_consistency(all_entities, text)
+
     return all_entities
 
 def get_pii_summary(entities):
