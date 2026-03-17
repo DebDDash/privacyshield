@@ -4,7 +4,41 @@ from langdetect import detect as detect_language
 import os
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
-CONFIDENCE_THRESHOLD = 0.4
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
+
+CONFIDENCE_THRESHOLD = 0.35
+
+LANGUAGE_MODELS = {
+    "en": "en_core_web_lg",
+    "de": "de_core_news_lg",
+    "fr": "fr_core_news_lg",
+    "es": "es_core_news_lg",
+    "it": "it_core_news_lg",
+}
+DEFAULT_LANGUAGE = "en"
+ALL_LANGUAGES = list(LANGUAGE_MODELS.keys())
+
+ORG_FALSE_POSITIVES = {
+    "SSN","DOB","EIN","NPI","ID","DOJ",
+    "IL","MA","CA","NY","TX",
+    "AHV-Nummer","AHV-Nr","AHV","AVS","Tel","Tél","Adresse","Diagnose"
+}
+
+SWIFT_FALSE_POSITIVES = {
+    "Rechnung","Paziente","Paciente","Telefono","Telefon",
+    "Patient","Diagnose","Betrag","Krankenhaus"
+}
+
+PERSON_FALSE_POSITIVES = {
+    "Email","Phone","Name","Address","Date","Salary","Patient",
+    "Doctor","Diagnosis","Contact","Subject","From","To","Ref",
+    "Policy","Claim","Invoice","Total","Amount","Note","Dear"
+}
+
+_analyzer = None
+
+# ─── IBAN VALIDATOR ───────────────────────────────────────────────────────────
+
 def validate_iban(iban):
     """Validate IBAN using mod-97 checksum."""
     iban = iban.replace(" ", "").replace("-", "")
@@ -16,31 +50,52 @@ def validate_iban(iban):
         numeric += str(int(ch, 36))
     return int(numeric) % 97 == 1
 
-SWIFT_FALSE_POSITIVES = {"Rechnung","Paziente","Paciente","Telefono","Telefon","Patient","Diagnose","Betrag"}
+# ─── CONTEXT-BASED NUMBER DETECTOR ───────────────────────────────────────────
+# Detects any value following label words like "number", "no.", "#", "id"
+# This catches policy numbers, invoice numbers, claim numbers of ANY format
 
-# Short common English words wrongly detected as PERSON on their own line
-PERSON_FALSE_POSITIVES = {
-    "Email","Phone","Name","Address","Date","Salary","Patient",
-    "Doctor","Diagnosis","Contact","Subject","From","To","Ref",
-    "Policy","Claim","Invoice","Total","Amount","Note","Dear"
-}
+GENERIC_NUMBER_LABELS = [
+    "number", "no.", "no:", "#", "num.", "num:", "id:", "id no",
+    "nummer", "numéro", "numero", "número",  # multilingual
+    "policy number", "policy no", "policy #",
+    "invoice number", "invoice no", "invoice #",
+    "claim number", "claim no", "claim #",
+    "reference number", "reference no", "ref no", "ref #",
+    "account number", "account no", "account #",
+    "document number", "document no", "doc no", "doc #",
+    "ticket number", "ticket no", "ticket #",
+    "order number", "order no", "order #",
+    "case number", "case no", "case #",
+    "member number", "member no", "member #",
+    "patient number", "patient no", "patient id",
+    "employee number", "employee no", "employee id",
+    "customer number", "customer no", "customer id",
+    "contract number", "contract no",
+    "registration number", "registration no",
+    "license number", "license no",
+]
 
-ORG_FALSE_POSITIVES = {
-    "SSN","DOB","EIN","NPI","ID","DOJ",
-    "IL","MA","CA","NY","TX",
-    "AHV-Nummer","AHV-Nr","AHV","AVS","Tel","Tél","Adresse","Diagnose"
-}
+def _extract_context_numbers(text):
+    """
+    Extract values that follow label words like 'policy number', 'invoice #' etc.
+    Returns list of (start, end, value) tuples.
+    """
+    import re
+    found = []
+    text_lower = text.lower()
 
-LANGUAGE_MODELS = {
-    "en": "en_core_web_lg",
-    "de": "de_core_news_lg",
-    "fr": "fr_core_news_lg",
-    "es": "es_core_news_lg",
-    "it": "it_core_news_lg",
-}
-DEFAULT_LANGUAGE = "en"
-ALL_LANGUAGES = list(LANGUAGE_MODELS.keys())
-_analyzer = None
+    for label in GENERIC_NUMBER_LABELS:
+        pattern = re.escape(label) + r"[\s:]*([A-Z0-9][A-Z0-9\-\/\.]{2,30})"
+        for m in re.finditer(pattern, text_lower):
+            # Get actual case from original text
+            actual_start = m.start(1)
+            actual_end = m.end(1)
+            actual_value = text[actual_start:actual_end]
+            found.append((actual_start, actual_end, actual_value))
+
+    return found
+
+# ─── CUSTOM RECOGNIZERS ───────────────────────────────────────────────────────
 
 def _build_custom_recognizers():
     recognizers = []
@@ -65,14 +120,15 @@ def _build_custom_recognizers():
             context=["salary","income","wage","pay","benefit","amount","due",
                      "premium","gross","net","total","betrag","salaire","stipendio"]))
 
-    # Phone numbers — all languages (handles +41, +33, +39, +34 formats)
+    # Phone numbers — all languages
     for lang in ALL_LANGUAGES:
         recognizers.append(PatternRecognizer(supported_entity="PHONE_NUMBER",
             supported_language=lang,
             patterns=[
                 Pattern("intl_phone", r"\+\d{1,3}[\s.\-]?\d{2,3}[\s.\-]?\d{3}[\s.\-]?\d{2}[\s.\-]?\d{2}", 0.85),
                 Pattern("us_phone",   r"\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b", 0.75),
-                Pattern("fr_phone", r"\+33[\s.]?\d[\s.]?(?:\d{2}[\s.]?){4}", 0.85),
+                Pattern("us_phone2",  r"\(\d{3}\)\d{3}-\d{4}", 0.85),
+                Pattern("fr_phone",   r"\+33[\s.]?\d[\s.]?(?:\d{2}[\s.]?){4}", 0.85),
             ],
             context=["tel","tél","phone","telefon","telefono","teléfono","mobile","handy"]))
 
@@ -89,13 +145,30 @@ def _build_custom_recognizers():
             patterns=[Pattern("iban", r"\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){4,6}(?:\s?[A-Z0-9]{1,4})?\b", 0.85)],
             context=["iban","bank","konto","compte","conto","cuenta"]))
 
-    # ID numbers — all languages
+    # Prefixed ID numbers (EMP-, PAT-, TAX-, RF-, etc.)
     for lang in ALL_LANGUAGES:
         recognizers.append(PatternRecognizer(supported_entity="ID_NUMBER",
             supported_language=lang,
             patterns=[Pattern("prefixed_id",
-                r"\b(EMP|PAT|POL|MED|INV|CLM|REF|ZUR|PH|MRN|HB)-[\w\d][\w\d-]*\b", 0.85)],
-            context=["employee","patient","policy","member","account","id","number","claim"]))
+                r"\b(EMP|PAT|POL|MED|INV|CLM|REF|ZUR|PH|MRN|HB|TAX|ID|ACC|CUST|ORD|CASE)-[\w\d][\w\d-]*\b",
+                0.85)],
+            context=["employee","patient","policy","member","account","id","number","claim","tax","invoice"]))
+
+    # UUID — all languages
+    for lang in ALL_LANGUAGES:
+        recognizers.append(PatternRecognizer(supported_entity="ID_NUMBER",
+            supported_language=lang,
+            patterns=[Pattern("uuid",
+                r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+                0.95)],
+            context=[]))
+
+    # RF Creditor Reference
+    for lang in ALL_LANGUAGES:
+        recognizers.append(PatternRecognizer(supported_entity="ID_NUMBER",
+            supported_language=lang,
+            patterns=[Pattern("rf_ref", r"\bRF\d{2}[A-Z0-9]{1,21}\b", 0.9)],
+            context=["reference","ref","creditor","payment","remittance"]))
 
     # Medical conditions — all languages
     for lang in ALL_LANGUAGES:
@@ -110,7 +183,7 @@ def _build_custom_recognizers():
             ],
             context=["diagnosis","diagnose","condition","medical","pre-existing","history"]))
 
-    # AHV/AVS Swiss number — German + French
+    # AHV/AVS Swiss number — DE, FR, IT
     for lang in ["de","fr","it"]:
         recognizers.append(PatternRecognizer(supported_entity="CH_AHV",
             supported_language=lang,
@@ -139,6 +212,8 @@ def _build_custom_recognizers():
 
     return recognizers
 
+# ─── ANALYZER ─────────────────────────────────────────────────────────────────
+
 def build_analyzer():
     models = [{"lang_code": lang, "model_name": model} for lang, model in LANGUAGE_MODELS.items()]
     provider = NlpEngineProvider(nlp_configuration={
@@ -156,6 +231,8 @@ def get_analyzer():
     if _analyzer is None:
         _analyzer = build_analyzer()
     return _analyzer
+
+# ─── LANGUAGE + DOCUMENT DETECTION ───────────────────────────────────────────
 
 def auto_detect_language(text):
     try:
@@ -179,22 +256,7 @@ def auto_detect_document_type(text):
     best = max(scores, key=scores.get)
     return best if scores[best] >= 2 else "general"
 
-# Words incorrectly matched as SWIFT/BIC codes
-def validate_iban(iban):
-    """Validate IBAN using mod-97 checksum."""
-    iban = iban.replace(" ", "").replace("-", "")
-    if len(iban) < 15 or len(iban) > 34:
-        return False
-    rearranged = iban[4:] + iban[:4]
-    numeric = ""
-    for ch in rearranged:
-        numeric += str(int(ch, 36))
-    return int(numeric) % 97 == 1
-
-SWIFT_FALSE_POSITIVES = {
-    "Rechnung","Paziente","Paciente","Telefono","Telefon",
-    "Patient","Diagnose","Betrag","Krankenhaus"
-}
+# ─── POST PROCESSING ──────────────────────────────────────────────────────────
 
 def _remove_false_positives(entities, text, document_type):
     email_spans = [(e["start"], e["end"]) for e in entities if e["entity_type"] == "EMAIL_ADDRESS"]
@@ -240,6 +302,8 @@ def _deduplicate_entities(entities):
             final.append(entity)
     return sorted(final, key=lambda x: x["start"])
 
+# ─── PUBLIC API ───────────────────────────────────────────────────────────────
+
 def detect_pii(text, language="auto", document_type="auto"):
     if not text or not text.strip():
         return []
@@ -250,7 +314,6 @@ def detect_pii(text, language="auto", document_type="auto"):
     analyzer = get_analyzer()
 
     # Run NER line by line to prevent entities spanning across newlines
-    # Track offset so start/end positions map back to original text
     all_entities = []
     offset = 0
     for line in text.split("\n"):
@@ -264,7 +327,22 @@ def detect_pii(text, language="auto", document_type="auto"):
                     "end": r.end + offset,
                     "score": round(r.score, 3)
                 })
-        offset += len(line) + 1  # +1 for the newline character
+
+            # Also run context-based number detection on this line
+            context_numbers = _extract_context_numbers(line)
+            existing_spans = {(e["start"] - offset, e["end"] - offset) for e in all_entities if e["start"] >= offset}
+            for (start, end, value) in context_numbers:
+                # Only add if not already covered by another entity
+                if (start, end) not in existing_spans:
+                    all_entities.append({
+                        "entity_type": "ID_NUMBER",
+                        "text": value,
+                        "start": start + offset,
+                        "end": end + offset,
+                        "score": 0.8
+                    })
+
+        offset += len(line) + 1  # +1 for newline
 
     all_entities = _remove_false_positives(all_entities, text, document_type)
     all_entities = _deduplicate_entities(all_entities)
