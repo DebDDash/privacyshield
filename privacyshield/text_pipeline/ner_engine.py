@@ -1,3 +1,4 @@
+import re
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from langdetect import detect as detect_language
@@ -167,7 +168,7 @@ def _build_custom_recognizers():
     for lang in ALL_LANGUAGES:
         recognizers.append(PatternRecognizer(supported_entity="ID_NUMBER",
             supported_language=lang,
-            patterns=[Pattern("rf_ref", r"\bRF\d{2}[A-Z0-9]{1,21}\b", 0.9)],
+            patterns=[Pattern("rf_ref", r"\bRF[A-Z0-9]{4,22}\b", 0.9)],
             context=["reference","ref","creditor","payment","remittance"]))
 
     # Medical conditions — all languages
@@ -272,13 +273,23 @@ def _remove_false_positives(entities, text, document_type):
             continue
         if et == "IBAN_CODE" and not validate_iban(t):
             continue
-        if et == "ORGANIZATION" and t.upper() in {fp.upper() for fp in ORG_FALSE_POSITIVES}:
+        # Never redact organizations/company names
+        if et == "ORGANIZATION":
             continue
-        if et in ("ORGANIZATION","PERSON","LOCATION") and t in ORG_FALSE_POSITIVES:
+        if et in ("PERSON","LOCATION") and t in ORG_FALSE_POSITIVES:
             continue
         if et == "URL" and any(s <= entity["start"] and entity["end"] <= e for s, e in email_spans):
             continue
         if et == "LOCATION" and len(t) == 2 and t.isupper():
+            continue
+        # Filter "30 days", "7 days", "24 hours" etc — durations not dates
+        if et == "DATE_TIME" and any(
+            t.lower().endswith(unit)
+            for unit in [" days", " day", " hours", " hour", " weeks", " week", " months", " month", " years", " year"]
+        ):
+            continue
+        # Filter short pure numbers detected as dates
+        if et == "DATE_TIME" and t.strip().isdigit() and len(t.strip()) <= 2:
             continue
         filtered.append(entity)
     return filtered
@@ -343,6 +354,28 @@ def detect_pii(text, language="auto", document_type="auto"):
                     })
 
         offset += len(line) + 1  # +1 for newline
+
+    # Extract names from label patterns missed by spaCy
+    # e.g. "Insured Name: Amanda Coleman", "Taxpayer Name: Tyler Moore"
+    name_label_re = re.compile(
+        r"(?i)(?:insured|taxpayer|signer|patient|employee|member|"
+        r"policy.?holder|claimant|beneficiary|account.?holder|"
+        r"authorized|contact|primary|secondary|full)\s+name\s*[:\-]\s*"
+        r"([A-Z][a-z]+(?:[ ][A-Z][a-z]+)+)"
+    )
+    for m in name_label_re.finditer(text):
+        start = m.start(1)
+        end = m.end(1)
+        # Only add if not already covered
+        already = any(e["start"] <= start and end <= e["end"] for e in all_entities)
+        if not already:
+            all_entities.append({
+                "entity_type": "PERSON",
+                "text": m.group(1),
+                "start": start,
+                "end": end,
+                "score": 0.9
+            })
 
     all_entities = _remove_false_positives(all_entities, text, document_type)
     all_entities = _deduplicate_entities(all_entities)
