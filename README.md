@@ -98,7 +98,7 @@ privacyshield/
 
 - Python 3.11
 - pip
-- No system dependencies required — pypdfium2 bundles its own PDF renderer and works on Windows, macOS, and Linux without poppler
+- No system dependencies required i.e. pypdfium2 bundles its own PDF renderer and works on Windows, macOS, and Linux without poppler
 
 > **Note:** First run will download spaCy language models (~2GB total) and PaddleOCR models (~200MB) automatically.
 
