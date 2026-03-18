@@ -254,6 +254,11 @@ pip install "numpy<2.0"
 ## Team
 
 Built for the **GenAI Zürich Hackathon 2026** — GoCalma Privacy Redaction Track.
+Members:
+ 1) Debarpita Dash
+ 2) Shrimi Agrawal
+ 3) Sruthi Subramanian
+ 4) Pragati Agrawal
 
 ---
 
